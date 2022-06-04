@@ -1,0 +1,133 @@
+from transformers import AutoTokenizer, AutoModelForMultipleChoice, TrainingArguments, Trainer
+from datasets import Features, load_dataset, ClassLabel, Value
+from dataclasses import dataclass
+from transformers.tokenization_utils_base import PreTrainedTokenizerBase, PaddingStrategy
+from typing import Optional, Union
+import numpy as np
+import torch
+
+model_name = "tohoku_bert"
+
+tokenizer = AutoTokenizer.from_pretrained("cl-tohoku/bert-base-japanese-whole-word-masking")
+model = AutoModelForMultipleChoice.from_pretrained("cl-tohoku/bert-base-japanese-whole-word-masking")
+data_dir = {"train": "./KUCI/train.jsonl", "development": "./KUCI/development.jsonl"}
+dataset_features=Features({
+        "id": Value("int64"),
+        "label": ClassLabel(names=["a", "b", "c", "d"]),
+        "agreement": Value("int64"),
+        "context": Value("string"),
+        "choice_a": Value("string"),
+        "choice_b": Value("string"),
+        "choice_c": Value("string"),
+        "choice_d": Value("string"),
+})
+
+# adding [PAD] to each batch
+@dataclass
+class DataCollatorForMultipleChoice:
+    tokenizer: PreTrainedTokenizerBase
+    padding: Union[bool, str, PaddingStrategy] = True
+    max_length: Optional[int] = None
+    pad_to_multiple_of: Optional[int] = None
+
+    def __call__(self, features):
+        label_name = "label" if "label" in features[0].keys() else "labels"
+        labels = [feature.pop(label_name) for feature in features]
+        batch_size = len(features)
+        num_choices = len(features[0]["input_ids"])
+        flattened_features = [[{k: v[i] for k, v in feature.items()} for i in range(num_choices)] for feature in features]
+        flattened_features = sum(flattened_features, [])
+        
+        batch = self.tokenizer.pad(
+            flattened_features,
+            padding=self.padding,
+            max_length=self.max_length,
+            pad_to_multiple_of=self.pad_to_multiple_of,
+            return_tensors="pt",
+        )
+        
+        batch = {k: v.view(batch_size, num_choices, -1) for k, v in batch.items()}
+        batch["labels"] = torch.tensor(labels, dtype=torch.int64)
+        return batch
+
+
+"""
+pre-processing of context and choice sentences
+input: huggingface_datasets
+output:
+{"input_ids": [
+                [tensor0, tensor1, tensor2, tensor3] - Q1,
+                [tensor0, tensor1, tensor2, tensor3] - Q2, ...
+              ]      
+ "token_type_ids": [
+                     [tensor0, ... , tensor3],...
+                   ]
+ "attention_mask: [
+                     [tensor0, ..., tensor3],...
+                  ] 
+}
+"""
+def data_to_tensor_features(data):
+    choices = ["choice_a", "choice_b", "choice_c", "choice_d"]
+    context_sentences_list = [["[CLS]" + " " + context] * 4 for context in data["context"]]
+    choice_sentences_list = [["[SEP]" + " " + data[choice][i] + " " + "[SEP]" for choice in choices] for i in range(len(data["context"]))]
+
+    context_sentences_list = sum(context_sentences_list, [])
+    choice_sentences_list = sum(choice_sentences_list, [])
+
+    tokenized_connected_sentences = tokenizer(context_sentences_list, choice_sentences_list, truncation=True, add_special_tokens=False)
+
+    # k = <str> e.g, "input_ids"
+    # v = <Tensor> len(v) = 4 * len(context)
+    features = {k: [v[i:i+4] for i in range(0, len(v), 4)] for k, v in tokenized_connected_sentences.items()}
+    
+    return features
+
+
+def compute_metrics(eval_predictions):
+    predictions, label_ids = eval_predictions
+    preds = np.argmax(predictions, axis=1)
+    return {"accuracy": (preds == label_ids).astype(np.float32).mean().item()}
+
+
+
+dataset = load_dataset("json", data_files={"train": data_dir["train"], "development": data_dir["development"]}, features=dataset_features)
+encoded_dataset = dataset.map(data_to_tensor_features, batched=True)
+
+
+batch_size = 32
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+print(device)
+model.to(device)
+
+# small_dataset = dataset["train"][:10]
+# features = data_to_tensor_features(small_dataset)
+# for k in range(3):
+#     print([tokenizer.decode(features["input_ids"][k][i], add_special_tokens=False) for i in range(4)])
+
+
+args = TrainingArguments(
+    f"{model_name}",
+    evaluation_strategy="epoch",
+    learning_rate=5e-5,
+    per_device_train_batch_size=batch_size,
+    per_device_eval_batch_size=batch_size,
+    num_train_epochs=3,
+    weight_decay=0.01,
+    push_to_hub=False,
+)
+
+trainer = Trainer(
+    model,
+    args,
+    train_dataset=encoded_dataset["train"],
+    eval_dataset=encoded_dataset["development"],
+    tokenizer=tokenizer,
+    data_collator=DataCollatorForMultipleChoice(tokenizer),
+    compute_metrics=compute_metrics,
+)
+
+trainer.train()
+model.save_pretrained("trained_model")
+
+
