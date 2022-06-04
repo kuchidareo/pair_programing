@@ -1,19 +1,24 @@
 from transformers import AutoTokenizer, AutoModelForMultipleChoice, TrainingArguments, Trainer
-from datasets import Features, load_dataset, ClassLabel, Value
+from datasets import Features, load_dataset, Value
 from dataclasses import dataclass
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase, PaddingStrategy
 from typing import Optional, Union
+from torch import nn
 import numpy as np
 import torch
+from torch.utils.data import DataLoader
+from tqdm import tqdm
 
-model_name = "tohoku_bert"
 
-tokenizer = AutoTokenizer.from_pretrained("cl-tohoku/bert-base-japanese-whole-word-masking")
-model = AutoModelForMultipleChoice.from_pretrained("cl-tohoku/bert-base-japanese-whole-word-masking")
-data_dir = {"train": "./KUCI/train.jsonl", "development": "./KUCI/development.jsonl"}
+model_mode = "auto_tohoku_bert"
+
+BATCH_SIZE = 32
+
+gpu_device_name = "cuda:0"
+
+data_dir = {"test": "./KUCI/test.jsonl"}
 dataset_features=Features({
         "id": Value("int64"),
-        "label": ClassLabel(names=["a", "b", "c", "d"]),
         "agreement": Value("int64"),
         "context": Value("string"),
         "choice_a": Value("string"),
@@ -31,8 +36,6 @@ class DataCollatorForMultipleChoice:
     pad_to_multiple_of: Optional[int] = None
 
     def __call__(self, features):
-        label_name = "label" if "label" in features[0].keys() else "labels"
-        labels = [feature.pop(label_name) for feature in features]
         batch_size = len(features)
         num_choices = len(features[0]["input_ids"])
         flattened_features = [[{k: v[i] for k, v in feature.items()} for i in range(num_choices)] for feature in features]
@@ -47,7 +50,6 @@ class DataCollatorForMultipleChoice:
         )
         
         batch = {k: v.view(batch_size, num_choices, -1) for k, v in batch.items()}
-        batch["labels"] = torch.tensor(labels, dtype=torch.int64)
         return batch
 
 
@@ -75,7 +77,12 @@ def data_to_tensor_features(data):
     context_sentences_list = sum(context_sentences_list, [])
     choice_sentences_list = sum(choice_sentences_list, [])
 
-    tokenized_connected_sentences = tokenizer(context_sentences_list, choice_sentences_list, truncation=True, add_special_tokens=False)
+    tokenized_connected_sentences = tokenizer(
+        context_sentences_list,
+        choice_sentences_list,
+        truncation=True,
+        add_special_tokens=False
+    )
 
     # k = <str> e.g, "input_ids"
     # v = <Tensor> len(v) = 4 * len(context)
@@ -83,35 +90,32 @@ def data_to_tensor_features(data):
     
     return features
 
-
 def compute_metrics(eval_predictions):
     predictions, label_ids = eval_predictions
     preds = np.argmax(predictions, axis=1)
     return {"accuracy": (preds == label_ids).astype(np.float32).mean().item()}
 
 
+main_device = torch.device(gpu_device_name if torch.cuda.is_available() else "cpu")
+print(main_device)
+
+
+if model_mode == "auto_tohoku_bert":
+    import_model_name = "cl-tohoku/bert-base-japanese-whole-word-masking"
+    tokenizer = AutoTokenizer.from_pretrained(import_model_name)
+    model = AutoModelForMultipleChoice.from_pretrained(f"{model_mode}_trained_model")
+    
 
 dataset = load_dataset("json", data_files={"train": data_dir["train"], "development": data_dir["development"]}, features=dataset_features)
 encoded_dataset = dataset.map(data_to_tensor_features, batched=True)
 
 
-batch_size = 32
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-print(device)
-model.to(device)
-
-# small_dataset = dataset["train"][:10]
-# features = data_to_tensor_features(small_dataset)
-# for k in range(3):
-#     print([tokenizer.decode(features["input_ids"][k][i], add_special_tokens=False) for i in range(4)])
-
-
 args = TrainingArguments(
-    f"{model_name}",
+    f"{model_mode}",
     evaluation_strategy="epoch",
     learning_rate=5e-5,
-    per_device_train_batch_size=batch_size,
-    per_device_eval_batch_size=batch_size,
+    per_device_train_batch_size=BATCH_SIZE,
+    per_device_eval_batch_size=BATCH_SIZE,
     num_train_epochs=3,
     weight_decay=0.01,
     push_to_hub=False,
@@ -120,14 +124,26 @@ args = TrainingArguments(
 trainer = Trainer(
     model,
     args,
-    train_dataset=encoded_dataset["train"],
-    eval_dataset=encoded_dataset["development"],
     tokenizer=tokenizer,
     data_collator=DataCollatorForMultipleChoice(tokenizer),
     compute_metrics=compute_metrics,
 )
 
-trainer.train()
-model.save_pretrained("trained_model")
+predictions = trainer.predict(encoded_dataset["test"]).prediction
+preds = np.argmax(predictions, axis=-1).astype(str)
+
+correspond = {"0": "a", "1": "b", "2": "c", "3": "d"}
+for i, label in correspond.items():
+    np.place(preds, preds==i, label)
+
+np.savetxt(f"./{model_mode}_trained_model/{model_mode}_prediction.csv", preds, fmt="%s")
+
+
+
+
+
+
+
+
 
 
