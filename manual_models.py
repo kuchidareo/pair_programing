@@ -1,4 +1,4 @@
-from transformers import AutoTokenizer, AutoModel
+from transformers import AutoTokenizer, AutoModel, T5Tokenizer
 from datasets import Features, load_dataset, ClassLabel, Value
 import numpy as np
 import torch
@@ -7,11 +7,11 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 import time
 
-# Choose from ["tohoku_bert"]
-model_mode = "tohoku_bert"
+# Choose from ["tohoku_bert", "roberta"]
+model_mode = "roberta"
 
 MAX_LENGTH = 80
-BATCH_SIZE = 16
+BATCH_SIZE = 8
 
 gpu_device_name = "cuda:0"
 
@@ -50,7 +50,7 @@ class MultipleChoiceModel(nn.Module):
     def forward(self, x):
         src = []
         for q in x:
-            t1 = self.bert(input_ids = q[0], attention_mask = q[1], token_type_ids = q[2])
+            t1 = self.bert(**q)
             t2 = self.dropout(t1.pooler_output)
             t3 = self.linear(t2).squeeze()
             src.append(t3)
@@ -59,13 +59,16 @@ class MultipleChoiceModel(nn.Module):
         return logits
 
 
-def generate_dataloader():
+def generate_dataloader(model_mode):
     dataset = load_dataset("json", data_files={"train": data_dir["train"], "development": data_dir["development"]}, features=dataset_features)
     encoded_dataset = dataset.map(data_to_tensor_features, batched=True)
     # 2 - 30 - data_size - 4 - 80
 
     encoded_dataset = encoded_dataset.rename_column("label", "labels")
-    encoded_dataset.set_format(type="torch", columns=["input_ids", "token_type_ids", "attention_mask", "labels"])
+    if model_mode == "roberta":
+        encoded_dataset.set_format(type="torch", columns=["input_ids", "attention_mask", "labels"])
+    else:
+        encoded_dataset.set_format(type="torch", columns=["input_ids", "token_type_ids", "attention_mask", "labels"])
     # 2 - 30 - data_size - 4 - 80
 
     train_dataloader = DataLoader(encoded_dataset["train"], batch_size=BATCH_SIZE)
@@ -115,13 +118,24 @@ def data_to_tensor_features(data):
     return features
 
 
-def batch_transform(batch):
+def batch_transform(batch, model_mode):
+    if model_mode == "roberta":
+        input_list = ['input_ids', 'attention_mask']
+    else:
+        input_list = ['input_ids', 'attention_mask', 'token_type_ids']
+
     y = batch["labels"].to(main_device)
-    X = []
-    for x in ['input_ids', 'attention_mask', 'token_type_ids']:
+
+    tmp = []
+    for x in input_list:
         src = torch.stack((batch[x][0], batch[x][1], batch[x][2], batch[x][3]), 0).unsqueeze(0)
-        X.append(src.permute(1, 0, 2, 3).contiguous())
-    X = torch.cat(X, dim=1).to(main_device) # torch.Size([4, 3, batch, MAX_LEN])
+        tmp.append(src.permute(1, 0, 2, 3).contiguous())
+    tmp = torch.cat(tmp, dim=1).to(main_device) # torch.Size([4, label, batch, MAX_LEN)
+    
+    X = [{} for _ in range(len(tmp))] # torch.Size([4, {label: tensor(batch, MAX_LEN)} * 3)
+    for i in range(len(tmp)):
+        for j, x in enumerate(input_list):
+            X[i][x] = tmp[i][j]
 
     return X, y
 
@@ -139,9 +153,14 @@ if model_mode == "tohoku_bert":
     import_model_name = "cl-tohoku/bert-base-japanese-whole-word-masking"
     tokenizer = AutoTokenizer.from_pretrained(import_model_name)
     model = MultipleChoiceModel().to(main_device)
+elif model_mode == "roberta":
+    import_model_name = "rinna/japanese-roberta-base"
+    tokenizer = T5Tokenizer.from_pretrained(import_model_name)
+    tokenizer.do_lower_case = True
+    model = MultipleChoiceModel().to(main_device)
 
 
-data_loaders = generate_dataloader()
+data_loaders = generate_dataloader(model_mode)
 train_dataloader = data_loaders["train"]
 develop_dataloader = data_loaders["develop"]
 
@@ -151,7 +170,7 @@ loss_fn = nn.CrossEntropyLoss()
 def train(dataloader, model, loss_fn, optimizer):
     model.train()
     for batch in tqdm(dataloader):
-        X, y = batch_transform(batch)
+        X, y = batch_transform(batch, model_mode)
         pred = model(X)
         loss = loss_fn(pred, y)
 
@@ -165,7 +184,7 @@ def test(dataloader, model):
     model.eval()
     with torch.no_grad():
         for batch in tqdm(dataloader):
-            X, y = batch_transform(batch)
+            X, y = batch_transform(batch, model_mode)
             pred = model(X)
             predictions = torch.argmax(pred, dim=-1)
             correct += (predictions == y).type(torch.float).sum().item()

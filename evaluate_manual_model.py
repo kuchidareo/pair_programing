@@ -1,4 +1,4 @@
-from transformers import AutoTokenizer, AutoModel
+from transformers import AutoTokenizer, AutoModel, T5Tokenizer
 from datasets import Features, load_dataset, Value
 from dataclasses import dataclass
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase, PaddingStrategy
@@ -9,7 +9,8 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-model_mode = "tohoku_bert"
+# Choose from ["tohoku_bert", "roberta"]
+model_mode = "roberta"
 
 BATCH_SIZE = 32
 MAX_LENGTH = 80
@@ -38,7 +39,7 @@ class MultipleChoiceModel(nn.Module):
     def forward(self, x):
         src = []
         for q in x:
-            t1 = self.bert(input_ids = q[0], attention_mask = q[1], token_type_ids = q[2])
+            t1 = self.bert(**q)
             t2 = self.dropout(t1.pooler_output)
             t3 = self.linear(t2).squeeze()
             src.append(t3)
@@ -101,13 +102,23 @@ def data_to_tensor_features(data):
     
     return features
 
-def batch_transform(batch):
-    X = []
-    for x in ['input_ids', 'attention_mask', 'token_type_ids']:
-        src = torch.stack((batch[x][0], batch[x][1], batch[x][2], batch[x][3]), 0).unsqueeze(0)
-        X.append(src.permute(1, 0, 2, 3).contiguous())
-    X = torch.cat(X, dim=1).to(main_device) # torch.Size([4, 3, batch, MAX_LEN])
+def batch_transform(batch, model_mode):
+    if model_mode == "roberta":
+        input_list = ['input_ids', 'attention_mask']
+    else:
+        input_list = ['input_ids', 'attention_mask', 'token_type_ids']
 
+    tmp = []
+    for x in input_list:
+        src = torch.stack((batch[x][0], batch[x][1], batch[x][2], batch[x][3]), 0).unsqueeze(0)
+        tmp.append(src.permute(1, 0, 2, 3).contiguous())
+    tmp = torch.cat(tmp, dim=1).to(main_device) # torch.Size([4, 3, batch, MAX_LEN])
+
+    X = [{} for _ in range(len(tmp))] # torch.Size([4, {label: tensor(batch, MAX_LEN)} * 3)
+    for i in range(len(tmp)):
+        for j, x in enumerate(input_list):
+            X[i][x] = tmp[i][j]
+            
     return X
 
 def compute_metrics(eval_predictions):
@@ -126,6 +137,13 @@ if model_mode == "tohoku_bert":
     model = MultipleChoiceModel()
     model.load_state_dict(torch.load(f'{model_mode}_trained_model/{model_mode}_trained_model.pt'))
     model.to(main_device)
+elif model_mode == "roberta":
+    import_model_name = "rinna/japanese-roberta-base"
+    tokenizer = T5Tokenizer.from_pretrained(import_model_name)
+    tokenizer.do_lower_case = True
+    model = MultipleChoiceModel()
+    model.load_state_dict(torch.load(f'{model_mode}_trained_model/{model_mode}_trained_model.pt'))
+    model.to(main_device)
 
 
 data_loaders = generate_dataloader()
@@ -137,7 +155,7 @@ def get_predictions(dataloader, model):
     model.eval()
     with torch.no_grad():
         for batch in tqdm(dataloader):
-            X = batch_transform(batch)
+            X = batch_transform(batch, model_mode)
             pred = model(X)
             predictions = torch.argmax(pred, dim=-1).reshape(-1)
             preds.append(predictions)

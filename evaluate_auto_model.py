@@ -3,16 +3,13 @@ from datasets import Features, load_dataset, Value
 from dataclasses import dataclass
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase, PaddingStrategy
 from typing import Optional, Union
-from torch import nn
 import numpy as np
 import torch
-from torch.utils.data import DataLoader
-from tqdm import tqdm
 
+# Choose from ["auto_tohoku_bert", "auto_roberta"]
+model_mode = "auto_roberta"
 
-model_mode = "auto_tohoku_bert"
-
-BATCH_SIZE = 32
+BATCH_SIZE = 8
 
 gpu_device_name = "cuda:0"
 
@@ -103,10 +100,14 @@ print(main_device)
 if model_mode == "auto_tohoku_bert":
     import_model_name = "cl-tohoku/bert-base-japanese-whole-word-masking"
     tokenizer = AutoTokenizer.from_pretrained(import_model_name)
-    model = AutoModelForMultipleChoice.from_pretrained(f"{model_mode}_trained_model")
+    model = AutoModelForMultipleChoice.from_pretrained(f"{model_mode}_trained_model").to(main_device)
+elif model_mode == "auto_roberta":
+    import_model_name = "rinna/japanese-roberta-base"
+    tokenizer = AutoTokenizer.from_pretrained(import_model_name)
+    model = AutoModelForMultipleChoice.from_pretrained(f"{model_mode}_trained_model").to(main_device)
     
 
-dataset = load_dataset("json", data_files={"train": data_dir["train"], "development": data_dir["development"]}, features=dataset_features)
+dataset = load_dataset("json", data_files={"test": data_dir["test"]}, features=dataset_features)
 encoded_dataset = dataset.map(data_to_tensor_features, batched=True)
 
 
@@ -129,7 +130,7 @@ trainer = Trainer(
     compute_metrics=compute_metrics,
 )
 
-predictions = trainer.predict(encoded_dataset["test"]).prediction
+predictions = trainer.predict(encoded_dataset["test"]).predictions
 preds = np.argmax(predictions, axis=-1).astype(str)
 
 correspond = {"0": "a", "1": "b", "2": "c", "3": "d"}
