@@ -119,7 +119,6 @@ if model_mode == "auto_tohoku_bert":
 elif model_mode == "auto_roberta":
     import_model_name = "rinna/japanese-roberta-base"
     tokenizer = AutoTokenizer.from_pretrained(import_model_name)
-    tokenizer.do_lower_case = True
     model = AutoModelForMultipleChoice.from_pretrained(import_model_name).to(device)
 
 

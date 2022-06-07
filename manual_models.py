@@ -1,4 +1,4 @@
-from transformers import AutoTokenizer, AutoModel, T5Tokenizer
+from transformers import AutoTokenizer, AutoModel
 from datasets import Features, load_dataset, ClassLabel, Value
 import numpy as np
 import torch
@@ -155,8 +155,7 @@ if model_mode == "tohoku_bert":
     model = MultipleChoiceModel().to(main_device)
 elif model_mode == "roberta":
     import_model_name = "rinna/japanese-roberta-base"
-    tokenizer = T5Tokenizer.from_pretrained(import_model_name)
-    tokenizer.do_lower_case = True
+    tokenizer = AutoTokenizer.from_pretrained(import_model_name)
     model = MultipleChoiceModel().to(main_device)
 
 

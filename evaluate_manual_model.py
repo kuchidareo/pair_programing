@@ -1,8 +1,5 @@
-from transformers import AutoTokenizer, AutoModel, T5Tokenizer
+from transformers import AutoTokenizer, AutoModel
 from datasets import Features, load_dataset, Value
-from dataclasses import dataclass
-from transformers.tokenization_utils_base import PreTrainedTokenizerBase, PaddingStrategy
-from typing import Optional, Union
 from torch import nn
 import numpy as np
 import torch
@@ -139,8 +136,7 @@ if model_mode == "tohoku_bert":
     model.to(main_device)
 elif model_mode == "roberta":
     import_model_name = "rinna/japanese-roberta-base"
-    tokenizer = T5Tokenizer.from_pretrained(import_model_name)
-    tokenizer.do_lower_case = True
+    tokenizer = AutoTokenizer.from_pretrained(import_model_name)
     model = MultipleChoiceModel()
     model.load_state_dict(torch.load(f'{model_mode}_trained_model/{model_mode}_trained_model.pt'))
     model.to(main_device)
