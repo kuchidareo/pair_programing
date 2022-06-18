@@ -1,4 +1,4 @@
-from transformers import AutoTokenizer, AutoModel
+from transformers import AutoTokenizer, AutoModel, BertConfig, BertTokenizer, BertModel
 from datasets import Features, load_dataset, ClassLabel, Value
 import numpy as np
 import torch
@@ -7,7 +7,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 import time
 
-# Choose from ["tohoku_bert", "roberta"]
+# Choose from ["tohoku_bert", "kyodai_bert", "roberta"]
 model_mode = "tohoku_bert"
 
 MAX_LENGTH = 80
@@ -43,7 +43,7 @@ dataset_features = Features({
 class MultipleChoiceModel(nn.Module):
     def __init__(self, num_choices=4):
         super(MultipleChoiceModel, self).__init__()
-        self.bert = AutoModel.from_pretrained(import_model_name)
+        self.bert = AutoModel.from_pretrained(import_model_name, config=config)
         self.dropout = nn.Dropout(p=0.1)
         self.linear = nn.Linear(768, 1)
         self.num_choices = num_choices
@@ -144,14 +144,19 @@ print("main_device: ", main_device)
 
 
 if model_mode == "tohoku_bert":
-    import_model_name = "cl-tohoku/bert-base-japanese-whole-word-masking"
+    import_model_name = "cl-tohoku/bert-base-japanese"
+    config = None
     tokenizer = AutoTokenizer.from_pretrained(import_model_name)
-    model = MultipleChoiceModel().to(main_device)
+elif model_mode == "kyodai_bert":
+    import_model_name = "../preTrainedModels/bert/Japanese_L-12_H-768_A-12_E-30_BPE_transformers"
+    config = BertConfig.from_json_file(f'{import_model_name}/config.json')
+    tokenizer = BertTokenizer(f'{import_model_name}/vocab.txt', do_lower_case=False, do_basic_tokenize=False)
 elif model_mode == "roberta":
     import_model_name = "rinna/japanese-roberta-base"
+    config = None
     tokenizer = AutoTokenizer.from_pretrained(import_model_name)
-    model = MultipleChoiceModel().to(main_device)
 
+model = MultipleChoiceModel().to(main_device)
 data_loaders = generate_dataloader(model_mode)
 train_dataloader = data_loaders["train"]
 develop_dataloader = data_loaders["develop"]
@@ -189,8 +194,8 @@ for t in range(epochs):
     print(f"Epoch {t+1}")
     train(train_dataloader, model, loss_fn, optimizer)
     test(develop_dataloader, model)
+    if not small_data_mode:
+        torch.save(model.state_dict(), f'{model_mode}_trained_model/{model_mode}_trained_model_epoch{t}.pt')
+        print(f"model saved at: {model_mode}_trained_model/{model_mode}_trained_model_epoch{t}.pt")
 print("DONE")
 
-if not small_data_mode:
-    torch.save(model.state_dict(), f'{model_mode}_trained_model/{model_mode}_trained_model.pt')
-    print(f"model saved at: {model_mode}_trained_model/{model_mode}_trained_model.pt")

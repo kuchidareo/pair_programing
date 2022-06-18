@@ -1,4 +1,4 @@
-from transformers import AutoTokenizer, AutoModel
+from transformers import AutoTokenizer, AutoModel, BertConfig, BertTokenizer
 from datasets import Features, load_dataset, Value
 from torch import nn
 import numpy as np
@@ -28,7 +28,7 @@ dataset_features=Features({
 class MultipleChoiceModel(nn.Module):
     def __init__(self, num_choices=4):
         super(MultipleChoiceModel, self).__init__()
-        self.bert = AutoModel.from_pretrained(import_model_name)
+        self.bert = AutoModel.from_pretrained(import_model_name, config=config)
         self.dropout = nn.Dropout(p=0.1)
         self.linear = nn.Linear(768, 1)
         self.num_choices = num_choices
@@ -126,15 +126,17 @@ print(main_device)
 if model_mode == "tohoku_bert":
     import_model_name = "cl-tohoku/bert-base-japanese-whole-word-masking"
     tokenizer = AutoTokenizer.from_pretrained(import_model_name)
-    model = MultipleChoiceModel()
-    model.load_state_dict(torch.load(f'{model_mode}_trained_model/{model_mode}_trained_model.pt'))
-    model.to(main_device)
+elif model_mode == "kyodai-bert":
+    import_model_name = "../preTrainedModels/bert/Japanese_L-12_H-768_A-12_E-30_BPE_transformers"
+    config = BertConfig.from_json_file(f'{import_model_name}/config.json')
+    tokenizer = BertTokenizer(f'{import_model_name}/vocab.txt', do_lower_case=False, do_basic_tokenize=False)
 elif model_mode == "roberta":
     import_model_name = "rinna/japanese-roberta-base"
     tokenizer = AutoTokenizer.from_pretrained(import_model_name)
-    model = MultipleChoiceModel()
-    model.load_state_dict(torch.load(f'{model_mode}_trained_model/{model_mode}_trained_model.pt'))
-    model.to(main_device)
+
+model = MultipleChoiceModel()
+model.load_state_dict(torch.load(f'{model_mode}_trained_model/{model_mode}_trained_model.pt'))
+model.to(main_device)
 
 
 data_loaders = generate_dataloader()
