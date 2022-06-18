@@ -6,9 +6,9 @@ from typing import Optional, Union
 import numpy as np
 import torch
 
-# Choose from ["auto_tohoku_bert"]
-model_mode = "auto_tohoku_bert"
-BATCH_SIZE = 32
+# Choose from ["auto_tohoku_bert", "auto_roberta"]
+model_mode = "auto_roberta"
+BATCH_SIZE = 8
 
 gpu_device_name = "cuda:0"
 
@@ -89,7 +89,12 @@ def data_to_tensor_features(data):
     context_sentences_list = sum(context_sentences_list, [])
     choice_sentences_list = sum(choice_sentences_list, [])
 
-    tokenized_connected_sentences = tokenizer(context_sentences_list, choice_sentences_list, truncation=True, add_special_tokens=False)
+    tokenized_connected_sentences = tokenizer(
+        context_sentences_list,
+        choice_sentences_list,
+        truncation=True,
+        add_special_tokens=False
+    )
 
     # k = <str> e.g, "input_ids"
     # v = <Tensor> len(v) = 4 * len(context)
@@ -108,8 +113,13 @@ device = torch.device(gpu_device_name if torch.cuda.is_available() else "cpu")
 print(device)
 
 if model_mode == "auto_tohoku_bert":
-    tokenizer = AutoTokenizer.from_pretrained("cl-tohoku/bert-base-japanese-whole-word-masking")
-    model = AutoModelForMultipleChoice.from_pretrained("cl-tohoku/bert-base-japanese-whole-word-masking").to(device)
+    import_model_name = "cl-tohoku/bert-base-japanese-whole-word-masking"
+    tokenizer = AutoTokenizer.from_pretrained(import_model_name)
+    model = AutoModelForMultipleChoice.from_pretrained(import_model_name).to(device)
+elif model_mode == "auto_roberta":
+    import_model_name = "rinna/japanese-roberta-base"
+    tokenizer = AutoTokenizer.from_pretrained(import_model_name)
+    model = AutoModelForMultipleChoice.from_pretrained(import_model_name).to(device)
 
 
 dataset = load_dataset("json", data_files={"train": data_dir["train"], "development": data_dir["development"]}, features=dataset_features)

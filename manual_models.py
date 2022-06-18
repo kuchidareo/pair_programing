@@ -1,4 +1,4 @@
-from transformers import AutoTokenizer, AutoModel
+from transformers import AutoTokenizer, AutoModel, BertConfig, BertTokenizer, BertModel
 from datasets import Features, load_dataset, ClassLabel, Value
 import numpy as np
 import torch
@@ -7,7 +7,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 import time
 
-# Choose from ["tohoku_bert"]
+# Choose from ["tohoku_bert", "kyodai_bert", "roberta"]
 model_mode = "tohoku_bert"
 
 MAX_LENGTH = 80
@@ -41,36 +41,36 @@ dataset_features = Features({
 
 
 class MultipleChoiceModel(nn.Module):
-    def __init__(self):
+    def __init__(self, num_choices=4):
         super(MultipleChoiceModel, self).__init__()
-        self.bert = AutoModel.from_pretrained(import_model_name)
+        self.bert = AutoModel.from_pretrained(import_model_name, config=config)
         self.dropout = nn.Dropout(p=0.1)
         self.linear = nn.Linear(768, 1)
+        self.num_choices = num_choices
 
     def forward(self, x):
-        src = []
-        for q in x:
-            t1 = self.bert(input_ids = q[0], attention_mask = q[1], token_type_ids = q[2])
-            t2 = self.dropout(t1.pooler_output)
-            t3 = self.linear(t2).squeeze()
-            src.append(t3)
-
-        logits = torch.t(torch.stack(src, dim=0)) # torch.Size([batch, 4])
+        t1 = self.bert(**x)
+        t2 = self.dropout(t1.pooler_output)
+        logits = self.linear(t2)
+        logits = logits.view(-1, self.num_choices)
         return logits
 
 
-def generate_dataloader():
+def generate_dataloader(model_mode):
     dataset = load_dataset("json", data_files={"train": data_dir["train"], "development": data_dir["development"]}, features=dataset_features)
     encoded_dataset = dataset.map(data_to_tensor_features, batched=True)
-    # 2 - 30 - data_size - 4 - 80
+    # 2 - colums - data_size - 4 - 80
 
     encoded_dataset = encoded_dataset.rename_column("label", "labels")
-    encoded_dataset.set_format(type="torch", columns=["input_ids", "token_type_ids", "attention_mask", "labels"])
-    # 2 - 30 - data_size - 4 - 80
+    if model_mode == "roberta":
+        encoded_dataset.set_format(type="torch", columns=["input_ids", "attention_mask", "labels"])
+    else:
+        encoded_dataset.set_format(type="torch", columns=["input_ids", "token_type_ids", "attention_mask", "labels"])
+    # 2 - colums - data_size - 4 - 80
 
     train_dataloader = DataLoader(encoded_dataset["train"], batch_size=BATCH_SIZE)
     develop_dataloader = DataLoader(encoded_dataset["development"], batch_size=BATCH_SIZE)
-    # (1) - 30 - 4 - data_size - 80
+    # (1) - colums - 4 - data_size - 80
 
     return {"train": train_dataloader, "develop": develop_dataloader}
             
@@ -115,13 +115,21 @@ def data_to_tensor_features(data):
     return features
 
 
-def batch_transform(batch):
+def batch_transform(batch, model_mode):
+    if model_mode == "roberta":
+        input_list = ['input_ids', 'attention_mask']
+    else:
+        input_list = ['input_ids', 'attention_mask', 'token_type_ids']
+
     y = batch["labels"].to(main_device)
-    X = []
-    for x in ['input_ids', 'attention_mask', 'token_type_ids']:
-        src = torch.stack((batch[x][0], batch[x][1], batch[x][2], batch[x][3]), 0).unsqueeze(0)
-        X.append(src.permute(1, 0, 2, 3).contiguous())
-    X = torch.cat(X, dim=1).to(main_device) # torch.Size([4, 3, batch, MAX_LEN])
+
+    # ori: columns(dict) - 4(list) - tensor(batch - 80) を
+    # X  : columns(dict) - tensor(batch*4 - 80) にしたい。
+    X = {}
+    for x in input_list:
+        src = torch.stack((batch[x][0], batch[x][1], batch[x][2], batch[x][3]), 0)
+        src = src.permute(1, 0, 2).contiguous()
+        X[x] = src.view(-1, src.size(-1)).to(main_device)
 
     return X, y
 
@@ -136,12 +144,20 @@ print("main_device: ", main_device)
 
 
 if model_mode == "tohoku_bert":
-    import_model_name = "cl-tohoku/bert-base-japanese-whole-word-masking"
+    import_model_name = "cl-tohoku/bert-base-japanese"
+    config = None
     tokenizer = AutoTokenizer.from_pretrained(import_model_name)
-    model = MultipleChoiceModel().to(main_device)
+elif model_mode == "kyodai_bert":
+    import_model_name = "../preTrainedModels/bert/Japanese_L-12_H-768_A-12_E-30_BPE_transformers"
+    config = BertConfig.from_json_file(f'{import_model_name}/config.json')
+    tokenizer = BertTokenizer(f'{import_model_name}/vocab.txt', do_lower_case=False, do_basic_tokenize=False)
+elif model_mode == "roberta":
+    import_model_name = "rinna/japanese-roberta-base"
+    config = None
+    tokenizer = AutoTokenizer.from_pretrained(import_model_name)
 
-
-data_loaders = generate_dataloader()
+model = MultipleChoiceModel().to(main_device)
+data_loaders = generate_dataloader(model_mode)
 train_dataloader = data_loaders["train"]
 develop_dataloader = data_loaders["develop"]
 
@@ -151,7 +167,7 @@ loss_fn = nn.CrossEntropyLoss()
 def train(dataloader, model, loss_fn, optimizer):
     model.train()
     for batch in tqdm(dataloader):
-        X, y = batch_transform(batch)
+        X, y = batch_transform(batch, model_mode)
         pred = model(X)
         loss = loss_fn(pred, y)
 
@@ -165,7 +181,7 @@ def test(dataloader, model):
     model.eval()
     with torch.no_grad():
         for batch in tqdm(dataloader):
-            X, y = batch_transform(batch)
+            X, y = batch_transform(batch, model_mode)
             pred = model(X)
             predictions = torch.argmax(pred, dim=-1)
             correct += (predictions == y).type(torch.float).sum().item()
@@ -178,8 +194,8 @@ for t in range(epochs):
     print(f"Epoch {t+1}")
     train(train_dataloader, model, loss_fn, optimizer)
     test(develop_dataloader, model)
+    if not small_data_mode:
+        torch.save(model.state_dict(), f'{model_mode}_trained_model/{model_mode}_trained_model_epoch{t}.pt')
+        print(f"model saved at: {model_mode}_trained_model/{model_mode}_trained_model_epoch{t}.pt")
 print("DONE")
 
-if not small_data_mode:
-    torch.save(model.state_dict(), f'{model_mode}_trained_model/{model_mode}_trained_model.pt')
-    print(f"model saved at: {model_mode}_trained_model/{model_mode}_trained_model.pt")

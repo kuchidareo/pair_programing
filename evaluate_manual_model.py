@@ -1,15 +1,13 @@
-from transformers import AutoTokenizer, AutoModel
+from transformers import AutoTokenizer, AutoModel, BertConfig, BertTokenizer
 from datasets import Features, load_dataset, Value
-from dataclasses import dataclass
-from transformers.tokenization_utils_base import PreTrainedTokenizerBase, PaddingStrategy
-from typing import Optional, Union
 from torch import nn
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-model_mode = "tohoku_bert"
+# Choose from ["tohoku_bert", "roberta"]
+model_mode = "roberta"
 
 BATCH_SIZE = 32
 MAX_LENGTH = 80
@@ -27,37 +25,33 @@ dataset_features=Features({
         "choice_d": Value("string"),
 })
 
-
 class MultipleChoiceModel(nn.Module):
-    def __init__(self):
+    def __init__(self, num_choices=4):
         super(MultipleChoiceModel, self).__init__()
-        self.bert = AutoModel.from_pretrained(import_model_name)
+        self.bert = AutoModel.from_pretrained(import_model_name, config=config)
         self.dropout = nn.Dropout(p=0.1)
         self.linear = nn.Linear(768, 1)
+        self.num_choices = num_choices
 
     def forward(self, x):
-        src = []
-        for q in x:
-            t1 = self.bert(input_ids = q[0], attention_mask = q[1], token_type_ids = q[2])
-            t2 = self.dropout(t1.pooler_output)
-            t3 = self.linear(t2).squeeze()
-            src.append(t3)
-
-        logits = torch.t(torch.stack(src, dim=0)) # torch.Size([batch, 4])
+        t1 = self.bert(**x)
+        t2 = self.dropout(t1.pooler_output)
+        logits = self.linear(t2)
+        logits = logits.view(-1, self.num_choices)
         return logits
             
 
 def generate_dataloader():
     dataset = load_dataset("json", data_files={"test": data_dir["test"]}, features=dataset_features)
     encoded_dataset = dataset.map(data_to_tensor_features, batched=True)
-    # 2 - 30 - data_size - 4 - 80
+    # 2 - columns - data_size - 4 - 80
 
     encoded_dataset = encoded_dataset.rename_column("label", "labels")
     encoded_dataset.set_format(type="torch", columns=["input_ids", "token_type_ids", "attention_mask"])
-    # 2 - 30 - data_size - 4 - 80
+    # 2 - columns - data_size - 4 - 80
 
     test_dataloader = DataLoader(encoded_dataset["test"], batch_size=BATCH_SIZE)
-    # (1) - 30 - 4 - data_size - 80
+    # (1) - columns - 4 - data_size - 80
 
     return {"test": test_dataloader}
 
@@ -101,14 +95,23 @@ def data_to_tensor_features(data):
     
     return features
 
-def batch_transform(batch):
-    X = []
-    for x in ['input_ids', 'attention_mask', 'token_type_ids']:
-        src = torch.stack((batch[x][0], batch[x][1], batch[x][2], batch[x][3]), 0).unsqueeze(0)
-        X.append(src.permute(1, 0, 2, 3).contiguous())
-    X = torch.cat(X, dim=1).to(main_device) # torch.Size([4, 3, batch, MAX_LEN])
+def batch_transform(batch, model_mode):
+    if model_mode == "roberta":
+        input_list = ['input_ids', 'attention_mask']
+    else:
+        input_list = ['input_ids', 'attention_mask', 'token_type_ids']
 
-    return X
+    y = batch["labels"].to(main_device)
+
+    # ori: columns(dict) - 4(list) - tensor(batch - 80) を
+    # X  : columns(dict) - tensor(batch*4 - 80) にしたい。
+    X = {}
+    for x in input_list:
+        src = torch.stack((batch[x][0], batch[x][1], batch[x][2], batch[x][3]), 0)
+        src = src.permute(1, 0, 2).contiguous()
+        X[x] = src.view(-1, src.size(-1)).to(main_device)
+
+    return X, y
 
 def compute_metrics(eval_predictions):
     predictions, label_ids = eval_predictions
@@ -123,9 +126,17 @@ print(main_device)
 if model_mode == "tohoku_bert":
     import_model_name = "cl-tohoku/bert-base-japanese-whole-word-masking"
     tokenizer = AutoTokenizer.from_pretrained(import_model_name)
-    model = MultipleChoiceModel()
-    model.load_state_dict(torch.load(f'{model_mode}_trained_model/{model_mode}_trained_model.pt'))
-    model.to(main_device)
+elif model_mode == "kyodai-bert":
+    import_model_name = "../preTrainedModels/bert/Japanese_L-12_H-768_A-12_E-30_BPE_transformers"
+    config = BertConfig.from_json_file(f'{import_model_name}/config.json')
+    tokenizer = BertTokenizer(f'{import_model_name}/vocab.txt', do_lower_case=False, do_basic_tokenize=False)
+elif model_mode == "roberta":
+    import_model_name = "rinna/japanese-roberta-base"
+    tokenizer = AutoTokenizer.from_pretrained(import_model_name)
+
+model = MultipleChoiceModel()
+model.load_state_dict(torch.load(f'{model_mode}_trained_model/{model_mode}_trained_model.pt'))
+model.to(main_device)
 
 
 data_loaders = generate_dataloader()
@@ -137,7 +148,7 @@ def get_predictions(dataloader, model):
     model.eval()
     with torch.no_grad():
         for batch in tqdm(dataloader):
-            X = batch_transform(batch)
+            X = batch_transform(batch, model_mode)
             pred = model(X)
             predictions = torch.argmax(pred, dim=-1).reshape(-1)
             preds.append(predictions)
